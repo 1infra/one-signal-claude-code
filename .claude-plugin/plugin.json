@@ -1,0 +1,53 @@
+{
+  "name": "one-signal",
+  "description": "One Signal × Claude Code — trace every session (turns, tool calls, tokens, cost) to your One Infra organization",
+  "version": "0.0.1",
+  "author": {
+    "name": "One Infra"
+  },
+  "license": "MIT",
+  "userConfig": {
+    "ONE_SIGNAL_BASE_URL": {
+      "type": "string",
+      "title": "One Infra connector URL",
+      "description": "Base URL of your One Connector deployment. The hook POSTs to <this>/api/v1/observe/ingest.",
+      "default": "https://connector.1infra.io"
+    },
+    "ONE_SIGNAL_API_TOKEN": {
+      "type": "string",
+      "title": "One Connector access token",
+      "description": "oc_... token from Console → Access tokens",
+      "sensitive": true,
+      "required": true
+    },
+    "ONE_SIGNAL_USER_ID": {
+      "type": "string",
+      "title": "User ID",
+      "description": "Optional user identifier attached to every trace (shown as the user in One Signal). Leave empty to omit."
+    },
+    "CC_ONE_SIGNAL_DEBUG": {
+      "type": "boolean",
+      "title": "Debug logging",
+      "description": "Write verbose logs to ~/.claude/state/one_signal_hook.log",
+      "default": false
+    },
+    "CC_ONE_SIGNAL_MAX_CHARS": {
+      "type": "number",
+      "title": "Max characters per field",
+      "description": "Truncate captured inputs/outputs to this many characters",
+      "default": 20000
+    },
+    "CC_ONE_SIGNAL_SKILL_TAGS": {
+      "type": "boolean",
+      "title": "Tag traces with skills",
+      "description": "Add a skill:<name> tag to traces for every skill invoked in the turn",
+      "default": true
+    },
+    "CC_ONE_SIGNAL_CAPTURE_SKILL_CONTENT": {
+      "type": "boolean",
+      "title": "Capture skill instructions",
+      "description": "Include the injected skill instruction text in the Skill tool span output",
+      "default": false
+    }
+  }
+}
