@@ -889,7 +889,7 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
                 # per-event 207 response (see post_batch()/deliver() below for how
                 # those per-event errors are now surfaced). Emit "SPAN" here and mark
                 # the tool-call intent via metadata.tool_name/tool_id instead; the
-                # One Signal read side (apps/connector/src/modules/signal/service.ts)
+                # One Signal read side (apps/server/src/modules/signal/service.ts)
                 # infers type "TOOL" back from that metadata when rendering the span
                 # tree.
                 obs_type="SPAN",
