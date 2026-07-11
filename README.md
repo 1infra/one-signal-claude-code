@@ -17,13 +17,16 @@ you and your teammates never see or handle a Langfuse key.
 ## Install
 
 ```bash
-claude plugin marketplace add <this-repo-url-or-path>
-claude plugin install one-signal@one-infra
+claude plugin marketplace add 1infra/1Infra
+claude plugin install one-signal@one-infra --config ONE_SIGNAL_API_TOKEN=<token>
 ```
 
-Restart Claude Code after install.
+Restart Claude Code after install. `claude plugin install` does not prompt
+for configuration interactively — pass it via `--config` at install time as
+above (see "Getting a token" below for `<token>`), or set/change any option
+later with `/plugin configure one-signal@one-infra` in Claude Code.
 
-On enable, you'll be prompted for:
+Available options:
 
 | Field | Description |
 | --- | --- |
@@ -39,7 +42,9 @@ On enable, you'll be prompted for:
 
 1. Open Console → **Access tokens**.
 2. Create a new token (`oc_...`). Give it a name you'll recognize later, e.g. "laptop — Claude Code".
-3. Paste it into `ONE_SIGNAL_API_TOKEN` when Claude Code prompts you on enable (or re-run `claude plugin enable one-signal` to reconfigure).
+3. Use it as `<token>` in the install command above (or re-run
+   `/plugin configure one-signal@one-infra` in Claude Code to set
+   `ONE_SIGNAL_API_TOKEN` later).
 
 The token is capped by your own organization permissions; it is not a
 Langfuse key and cannot be used to call Langfuse directly.
