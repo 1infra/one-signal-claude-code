@@ -5,6 +5,8 @@
   "author": {
     "name": "One Infra"
   },
+  "repository": "https://github.com/1infra/one-signal-claude-code",
+  "homepage": "https://github.com/1infra/one-signal-claude-code#readme",
   "license": "MIT",
   "userConfig": {
     "ONE_SIGNAL_BASE_URL": {

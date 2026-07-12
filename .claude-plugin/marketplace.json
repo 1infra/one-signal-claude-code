@@ -1,0 +1,15 @@
+{
+  "name": "one-infra",
+  "description": "One Infra plugins for Claude Code",
+  "owner": {
+    "name": "One Infra",
+    "url": "https://1infra.io"
+  },
+  "plugins": [
+    {
+      "name": "one-signal",
+      "source": "./",
+      "description": "Trace Claude Code sessions to your One Infra organization via One Connector"
+    }
+  ]
+}

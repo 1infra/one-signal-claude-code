@@ -17,7 +17,7 @@ you and your teammates never see or handle a Langfuse key.
 ## Install
 
 ```bash
-claude plugin marketplace add 1infra/1Infra
+claude plugin marketplace add 1infra/one-signal-claude-code
 claude plugin install one-signal@one-infra --config ONE_SIGNAL_API_TOKEN=<token>
 ```
 
