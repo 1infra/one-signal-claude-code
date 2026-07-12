@@ -41,13 +41,13 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-PLUGIN_VERSION = "0.0.3"
+PLUGIN_VERSION = "0.0.4"
 
 # --- Paths ---
 STATE_DIR = Path.home() / ".claude" / "state"
@@ -334,6 +334,15 @@ def extract_text(content: Any) -> str:
         return "\n".join([p for p in parts if p])
     return ""
 
+
+def count_omitted_images(content: Any) -> int:
+    if not isinstance(content, list):
+        return 0
+    return sum(
+        1 for block in content
+        if isinstance(block, dict) and block.get("type") in {"image", "input_image", "image_url", "computer_screenshot"}
+    )
+
 def truncate_text(s: str, max_chars: int = MAX_CHARS) -> Tuple[str, Dict[str, Any]]:
     if s is None:
         return "", {"truncated": False, "orig_len": 0}
@@ -398,18 +407,21 @@ class SessionState:
     turn_count: int = 0   # Turns already committed (built + fully accepted) for this
                            # session. Used both as the resume point for turn numbering
                            # and as the count that gets reported/tested.
+    instruction_snapshots: List[str] = field(default_factory=list)
 
 def load_session_state(global_state: Dict[str, Any], key: str) -> SessionState:
     s = global_state.get(key, {})
     return SessionState(
         offset=int(s.get("offset", 0)),
         turn_count=int(s.get("turn_count", 0)),
+        instruction_snapshots=[item for item in s.get("instruction_snapshots", []) if isinstance(item, str)],
     )
 
 def write_session_state(global_state: Dict[str, Any], key: str, ss: SessionState) -> None:
     global_state[key] = {
         "offset": ss.offset,
         "turn_count": ss.turn_count,
+        "instruction_snapshots": ss.instruction_snapshots,
         "updated": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -758,44 +770,120 @@ def trace_display_name(session_id: str, turn_num: int) -> str:
     return f"Claude Code - Turn {turn_num} ({short_session_label(session_id)})"
 
 
-def collect_instruction_documents(cwd: Optional[str]) -> List[Dict[str, str]]:
-    """Collect the user and project instruction files that governed this Session."""
-    candidates: List[Tuple[Path, str, str]] = [
-        (Path.home() / ".codex" / "AGENTS.md", "~/.codex/AGENTS.md", "global"),
-        (Path.home() / ".claude" / "CLAUDE.md", "~/.claude/CLAUDE.md", "global"),
-    ]
-    if cwd:
-        current = Path(cwd).expanduser().resolve()
-        project_root = next((path for path in (current, *current.parents) if (path / ".git").exists()), current)
-        directories = list(reversed(current.parents[:len(current.parents) - len(project_root.parents)])) + [current]
-        for directory in directories:
-            for relative in (Path("AGENTS.md"), Path("CLAUDE.md"), Path(".claude/CLAUDE.md")):
-                path = directory / relative
-                candidates.append((path, str(path.relative_to(project_root)), "project"))
+def _project_root(path: Path) -> Path:
+    return next((parent for parent in (path, *path.parents) if (parent / ".git").exists()), path)
 
-    documents: List[Dict[str, str]] = []
-    seen: set[Path] = set()
+
+def _tool_paths(value: Any) -> List[str]:
+    """Use structured tool fields only; parsing arbitrary commands would invent directory scopes."""
+    if isinstance(value, list):
+        return [path for item in value for path in _tool_paths(item)]
+    if not isinstance(value, dict):
+        return []
+    paths: List[str] = []
+    for key, child in value.items():
+        normalized = str(key).lower().replace("-", "_")
+        if normalized in {"path", "file", "file_path", "filepath", "workdir", "cwd", "directory"} and isinstance(child, str):
+            paths.append(child)
+        else:
+            paths.extend(_tool_paths(child))
+    return paths
+
+
+def _touched_directories(turn: Turn) -> Tuple[Optional[Path], List[Path]]:
+    raw_cwd = turn.user_msg.get("cwd")
+    if not isinstance(raw_cwd, str) or not raw_cwd:
+        return None, []
+    cwd = Path(raw_cwd).expanduser().resolve()
+    root = _project_root(cwd)
+    directories = [cwd]
+    for assistant in turn.assistant_msgs:
+        for tool_use in get_tool_use_blocks(get_content_from_row(assistant)):
+            for raw_path in _tool_paths(tool_use.get("input")):
+                candidate = Path(raw_path).expanduser()
+                if not candidate.is_absolute():
+                    candidate = cwd / candidate
+                try:
+                    resolved = candidate.resolve()
+                except (OSError, RuntimeError):
+                    continue
+                directory = resolved if resolved.is_dir() else resolved.parent
+                if directory.is_relative_to(root) and directory not in directories:
+                    directories.append(directory)
+    return root, directories
+
+
+def collect_instruction_documents(
+    turn: Turn,
+    known_instruction_documents: Optional[set[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Collect Claude Code CLAUDE.md snapshots while preserving logical symlink paths."""
+    known = known_instruction_documents if known_instruction_documents is not None else set()
+    home = Path.home()
+    candidates: List[Tuple[Path, str, str, Optional[str], Path]] = [
+        (home / ".claude" / "CLAUDE.md", "~/.claude/CLAUDE.md", "global", None, home),
+    ]
+    root, touched_directories = _touched_directories(turn)
+    if root is not None:
+        seen_logical_paths: set[Path] = set()
+        for touched in touched_directories:
+            relative = touched.relative_to(root)
+            directories = [root]
+            current = root
+            for part in relative.parts:
+                current /= part
+                directories.append(current)
+            for directory in directories:
+                for relative_path in (Path("CLAUDE.md"), Path(".claude/CLAUDE.md")):
+                    path = directory / relative_path
+                    if path in seen_logical_paths:
+                        continue
+                    seen_logical_paths.add(path)
+                    label = str(path.relative_to(root))
+                    directory_scope = str(directory.relative_to(root)) or "."
+                    candidates.append((path, label, "project", directory_scope, root))
+
+    documents: List[Dict[str, Any]] = []
     total_chars = 0
-    for path, label, scope in candidates:
+    for path, label, scope, directory_scope, allowed_root in candidates:
         try:
-            resolved = path.resolve()
-            if resolved in seen or not resolved.is_file():
+            resolved = path.resolve(strict=True)
+            # Preserve the logical CLAUDE.md path when it links to AGENTS.md,
+            # while refusing links that would upload files outside the user's
+            # home or the active repository.
+            if not resolved.is_file() or not resolved.is_relative_to(allowed_root.resolve()):
                 continue
             content = resolved.read_text(encoding="utf-8", errors="replace")[:MAX_INSTRUCTION_DOCUMENT_CHARS]
         except (OSError, RuntimeError):
             continue
         if not content.strip() or total_chars + len(content) > MAX_INSTRUCTION_DOCUMENTS_CHARS:
             continue
-        seen.add(resolved)
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        identity = instruction_document_identity(scope, label, content_hash)
+        if identity in known:
+            continue
+        known.add(identity)
         total_chars += len(content)
-        documents.append({"path": label, "scope": scope, "content": content})
-        if len(documents) >= MAX_INSTRUCTION_DOCUMENTS:
+        documents.append({
+            "agent": "claude-code",
+            "path": label,
+            "scope": scope,
+            "directory_scope": directory_scope,
+            "content": content,
+            "content_hash": content_hash,
+        })
+        if len(known) >= MAX_INSTRUCTION_DOCUMENTS:
             break
     return documents
 
 
+def instruction_document_identity(scope: str, path: str, content_hash: str) -> str:
+    return f"{scope}:{path}:{content_hash}"
+
+
 def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_path: Path,
-                       user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+                       user_id: Optional[str] = None,
+                       known_instruction_documents: Optional[set[str]] = None) -> List[Dict[str, Any]]:
     """
     Builds the ingestion-batch events for one turn: one trace-create, one root
     SPAN observation ("Turn N"), one GENERATION observation per assistant
@@ -836,13 +924,17 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
         v = turn.user_msg.get(src_key)
         if isinstance(v, str) and v:
             trace_metadata[dst_key] = v
+    omitted_image_count = count_omitted_images(get_content_from_row(turn.user_msg)) + sum(
+        count_omitted_images(get_content_from_row(message)) for message in turn.assistant_msgs
+    )
+    if omitted_image_count > 0:
+        trace_metadata["omitted_image_count"] = omitted_image_count
 
     skill_names = collect_skill_names(turn) if SKILL_TAGS else []
     if skill_names:
         trace_metadata["skill_names"] = skill_names
-    if turn_num == 1 and CAPTURE_INSTRUCTION_DOCUMENTS:
-        cwd = turn.user_msg.get("cwd")
-        instruction_documents = collect_instruction_documents(cwd if isinstance(cwd, str) else None)
+    if CAPTURE_INSTRUCTION_DOCUMENTS:
+        instruction_documents = collect_instruction_documents(turn, known_instruction_documents)
         if instruction_documents:
             trace_metadata["instruction_documents"] = instruction_documents
 
@@ -1260,10 +1352,20 @@ def main() -> int:
             # attributed back to individual turns for the FIX A commit decision below.
             events: List[Dict[str, Any]] = []
             event_turn_idx: List[int] = []
+            persisted_instruction_documents = set(ss.instruction_snapshots)
+            known_instruction_documents = set(persisted_instruction_documents)
+            instruction_documents_by_turn: List[set[str]] = []
             for i, t in enumerate(turns):
                 turn_num = ss.turn_count + i + 1
                 try:
-                    turn_events = build_turn_events(session_id, turn_num, t, transcript_path, user_id=user_id)
+                    turn_events = build_turn_events(
+                        session_id,
+                        turn_num,
+                        t,
+                        transcript_path,
+                        user_id=user_id,
+                        known_instruction_documents=known_instruction_documents,
+                    )
                 except Exception as e:
                     # Log at INFO so build failures are visible without needing
                     # CC_ONE_SIGNAL_DEBUG=true. A turn that fails to build produced no
@@ -1273,6 +1375,20 @@ def main() -> int:
                     # (same turn_num, since turn_count won't advance past it either).
                     info(f"build_turn_events failed: {type(e).__name__}: {e}")
                     turn_events = []
+                trace_metadata = next((
+                    event.get("body", {}).get("metadata", {})
+                    for event in turn_events
+                    if event.get("type") == "trace-create"
+                ), {})
+                instruction_documents_by_turn.append({
+                    instruction_document_identity(
+                        str(document.get("scope", "")),
+                        str(document.get("path", "")),
+                        str(document.get("content_hash", "")),
+                    )
+                    for document in trace_metadata.get("instruction_documents", [])
+                    if isinstance(document, dict)
+                })
                 events.extend(turn_events)
                 event_turn_idx.extend([i] * len(turn_events))
 
@@ -1302,6 +1418,9 @@ def main() -> int:
             if committed > 0:
                 ss.offset = turns[committed - 1].end_offset
                 ss.turn_count += committed
+                for identities in instruction_documents_by_turn[:committed]:
+                    persisted_instruction_documents.update(identities)
+                ss.instruction_snapshots = sorted(persisted_instruction_documents)
             # else: leave ss.offset/turn_count untouched -- nothing new was durably
             # accepted, so the next run re-reads and re-attempts from the same point.
 
