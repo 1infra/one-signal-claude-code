@@ -692,7 +692,12 @@ def _observation_create(*, obs_id: str, trace_id: str, parent_id: Optional[str],
     })
 
 def collect_skill_names(turn: Turn) -> List[str]:
-    """Return every explicitly invoked Skill name once, preserving call order."""
+    """Return every explicitly invoked Skill name once, preserving call order.
+
+    The Claude Code Skill tool call carries the skill under the `skill` key
+    (e.g. {"skill": "code-review", "args": "..."}) -- the only shape seen in
+    real transcripts.
+    """
     names: List[str] = []
     for am in turn.assistant_msgs:
         for tu in get_tool_use_blocks(get_content_from_row(am)):
@@ -701,21 +706,29 @@ def collect_skill_names(turn: Turn) -> List[str]:
             tu_input = tu.get("input")
             if not isinstance(tu_input, dict):
                 continue
-            skill = next((tu_input.get(key) for key in ("name", "skill", "skill_name", "skillName")
-                          if isinstance(tu_input.get(key), str) and tu_input.get(key)), None)
-            if isinstance(skill, str) and skill not in names:
+            skill = tu_input.get("skill")
+            if isinstance(skill, str) and skill and skill not in names:
                 names.append(skill)
     return names
 
 
 def mcp_attribution(tool_name: Any) -> Optional[Tuple[str, str]]:
+    """Split a Claude Code MCP tool name `mcp__<server>__<tool>` into
+    (server, tool). The tool half is re-joined on `__` so tool names that
+    themselves contain `__` survive. Returns None for non-MCP tools and for
+    malformed names that would yield an empty server or tool."""
     if not isinstance(tool_name, str) or not tool_name.startswith("mcp__"):
         return None
     parts = tool_name.split("__")
-    return (parts[1], "__".join(parts[2:])) if len(parts) >= 3 else None
+    if len(parts) < 3:
+        return None
+    server, tool = parts[1], "__".join(parts[2:])
+    return (server, tool) if server and tool else None
 
 
 def collect_mcp_tags(turn: Turn) -> List[str]:
+    """Return `mcp:<server>:<tool>` tags for every MCP tool invoked in the
+    turn, once each, in call order."""
     tags: List[str] = []
     for am in turn.assistant_msgs:
         for tool_use in get_tool_use_blocks(get_content_from_row(am)):

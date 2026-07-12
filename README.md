@@ -35,7 +35,7 @@ Available options:
 | `ONE_SIGNAL_USER_ID` | Optional. User identifier attached to every trace (shown as the user in One Signal). |
 | `CC_ONE_SIGNAL_DEBUG` | Verbose logging to `~/.claude/state/one_signal_hook.log`. Default `false`. |
 | `CC_ONE_SIGNAL_MAX_CHARS` | Truncate captured inputs/outputs to this many characters. Default `20000`. |
-| `CC_ONE_SIGNAL_SKILL_TAGS` | Tag traces with `skill:<name>` for every skill invoked in the turn. Default `true`. |
+| `CC_ONE_SIGNAL_SKILL_TAGS` | Attribute skills: tag traces `skill:<name>` and add a `skill_names` list to trace metadata for every skill invoked in the turn. Default `true`. (MCP-tool attribution is always on and not affected by this flag.) |
 | `CC_ONE_SIGNAL_CAPTURE_SKILL_CONTENT` | Include injected skill instruction text in the Skill tool span output. Default `false`. |
 
 ## Getting a token
@@ -64,7 +64,15 @@ A hook reads the session transcript incrementally on every turn (`Stop`)
 and at session end (`SessionEnd`), and builds one trace per turn: a root
 span ("Turn N"), one nested generation per assistant message, and nested
 tool-call spans under the generation that issued them. Token usage is
-captured when present. The resulting batch is POSTed as JSON to
+captured when present.
+
+Each turn is also attributed for later filtering in One Signal: invoked
+skills become `skill:<name>` trace tags plus a `skill_names` metadata list
+(gated by `CC_ONE_SIGNAL_SKILL_TAGS`), and MCP tool calls
+(`mcp__<server>__<tool>`) become `mcp:<server>:<tool>` trace tags with
+`mcp_server` / `mcp_tool` recorded on that tool's span metadata (always on).
+
+The resulting batch is POSTed as JSON to
 `<ONE_SIGNAL_BASE_URL>/api/v1/observe/ingest` with
 `Authorization: Bearer <ONE_SIGNAL_API_TOKEN>`; large batches are split into
 multiple requests to respect the server's per-request caps (200 events /
@@ -141,6 +149,16 @@ claude plugin uninstall one-signal
 - Nothing showing up in Console → Observe: check `~/.claude/state/one_signal_hook.log` (enable `CC_ONE_SIGNAL_DEBUG`).
 - `503 signal_not_configured` in the log: your organization hasn't connected Langfuse yet — do that in Console → Integrations, then it will pick up on the next turn.
 - Hook not firing: confirm with `claude plugin list` that `one-signal` is enabled; restart Claude Code.
+
+## Self-test
+
+```bash
+uv run python plugins/one-signal/test_hook.py
+```
+
+Runs the turn-assembly/attribution unit tests with no network calls. From
+the repo root, `pnpm test:plugins` runs this suite and the
+`one-signal-codex` one together.
 
 ## License
 
