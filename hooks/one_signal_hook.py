@@ -47,7 +47,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-PLUGIN_VERSION = "0.0.1"
+PLUGIN_VERSION = "0.0.3"
 
 # --- Paths ---
 STATE_DIR = Path.home() / ".claude" / "state"
@@ -62,6 +62,7 @@ def _opt(name: str) -> str:
 DEBUG = _opt("CC_ONE_SIGNAL_DEBUG").lower() == "true"
 SKILL_TAGS = (_opt("CC_ONE_SIGNAL_SKILL_TAGS") or "true").lower() == "true"
 CAPTURE_SKILL_CONTENT = _opt("CC_ONE_SIGNAL_CAPTURE_SKILL_CONTENT").lower() == "true"
+CAPTURE_INSTRUCTION_DOCUMENTS = (_opt("CC_ONE_SIGNAL_INSTRUCTION_DOCUMENTS") or "true").lower() == "true"
 try:
     MAX_CHARS = int(_opt("CC_ONE_SIGNAL_MAX_CHARS") or "20000")
 except ValueError:
@@ -72,6 +73,9 @@ except ValueError:
 # 3.5 MB in total" and a per-batch event-count cap of 200).
 MAX_EVENTS_PER_BATCH = 200
 MAX_BYTES_PER_BATCH = 3_500_000
+MAX_INSTRUCTION_DOCUMENTS = 20
+MAX_INSTRUCTION_DOCUMENT_CHARS = 64_000
+MAX_INSTRUCTION_DOCUMENTS_CHARS = 256_000
 
 # ----------------- Logging -----------------
 _logger: Optional[logging.Logger] = None
@@ -754,6 +758,42 @@ def trace_display_name(session_id: str, turn_num: int) -> str:
     return f"Claude Code - Turn {turn_num} ({short_session_label(session_id)})"
 
 
+def collect_instruction_documents(cwd: Optional[str]) -> List[Dict[str, str]]:
+    """Collect the user and project instruction files that governed this Session."""
+    candidates: List[Tuple[Path, str, str]] = [
+        (Path.home() / ".codex" / "AGENTS.md", "~/.codex/AGENTS.md", "global"),
+        (Path.home() / ".claude" / "CLAUDE.md", "~/.claude/CLAUDE.md", "global"),
+    ]
+    if cwd:
+        current = Path(cwd).expanduser().resolve()
+        project_root = next((path for path in (current, *current.parents) if (path / ".git").exists()), current)
+        directories = list(reversed(current.parents[:len(current.parents) - len(project_root.parents)])) + [current]
+        for directory in directories:
+            for relative in (Path("AGENTS.md"), Path("CLAUDE.md"), Path(".claude/CLAUDE.md")):
+                path = directory / relative
+                candidates.append((path, str(path.relative_to(project_root)), "project"))
+
+    documents: List[Dict[str, str]] = []
+    seen: set[Path] = set()
+    total_chars = 0
+    for path, label, scope in candidates:
+        try:
+            resolved = path.resolve()
+            if resolved in seen or not resolved.is_file():
+                continue
+            content = resolved.read_text(encoding="utf-8", errors="replace")[:MAX_INSTRUCTION_DOCUMENT_CHARS]
+        except (OSError, RuntimeError):
+            continue
+        if not content.strip() or total_chars + len(content) > MAX_INSTRUCTION_DOCUMENTS_CHARS:
+            continue
+        seen.add(resolved)
+        total_chars += len(content)
+        documents.append({"path": label, "scope": scope, "content": content})
+        if len(documents) >= MAX_INSTRUCTION_DOCUMENTS:
+            break
+    return documents
+
+
 def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_path: Path,
                        user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
@@ -800,6 +840,11 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
     skill_names = collect_skill_names(turn) if SKILL_TAGS else []
     if skill_names:
         trace_metadata["skill_names"] = skill_names
+    if turn_num == 1 and CAPTURE_INSTRUCTION_DOCUMENTS:
+        cwd = turn.user_msg.get("cwd")
+        instruction_documents = collect_instruction_documents(cwd if isinstance(cwd, str) else None)
+        if instruction_documents:
+            trace_metadata["instruction_documents"] = instruction_documents
 
     tags = ["claude-code", *collect_mcp_tags(turn)]
     if SKILL_TAGS:

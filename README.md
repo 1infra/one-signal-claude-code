@@ -39,6 +39,7 @@ Optional environment variables:
 | `CC_ONE_SIGNAL_MAX_CHARS` | Truncate captured inputs/outputs to this many characters. Default `20000`. |
 | `CC_ONE_SIGNAL_SKILL_TAGS` | Attribute skills: tag traces `skill:<name>` and add a `skill_names` list to trace metadata for every skill invoked in the turn. Default `true`. (MCP-tool attribution is always on and not affected by this flag.) |
 | `CC_ONE_SIGNAL_CAPTURE_SKILL_CONTENT` | Include injected skill instruction text in the Skill tool span output. Default `false`. |
+| `CC_ONE_SIGNAL_INSTRUCTION_DOCUMENTS` | Upload active global and project `AGENTS.md` / `CLAUDE.md` files on the first turn for Intelligence compliance analysis. Default `true`. |
 
 ## Getting a token
 
@@ -79,6 +80,12 @@ The resulting batch is POSTed as JSON to
 `Authorization: Bearer <ONE_SIGNAL_API_TOKEN>`; large batches are split into
 multiple requests to respect the server's per-request caps (200 events /
 3.5 MB).
+
+On the first turn, the hook also attaches the active `~/.codex/AGENTS.md`,
+`~/.claude/CLAUDE.md`, and project-level `AGENTS.md` / `CLAUDE.md` files so
+Intelligence can evaluate instruction compliance. Collection is capped at 20
+files, 64,000 characters per file, and 256,000 characters total. Set
+`CC_ONE_SIGNAL_INSTRUCTION_DOCUMENTS=false` to disable it.
 
 State is kept in `~/.claude/state/one_signal_state.json` so re-runs only
 process new turns — restarting Claude Code or re-enabling the plugin will
