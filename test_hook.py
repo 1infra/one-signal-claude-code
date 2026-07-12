@@ -9,6 +9,7 @@ From the repo root, `pnpm test:plugins` runs this suite and the
 one-signal-codex one together.
 """
 import importlib.util
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -61,7 +62,7 @@ class TestAttribution(unittest.TestCase):
         self.assertEqual(trace["metadata"]["skill_names"], ["code-review"])
         self.assertIn("skill:code-review", trace["tags"])
 
-    def test_first_turn_uploads_global_and_project_instruction_documents(self):
+    def test_uploads_only_claude_instructions_and_preserves_symlink_identity(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)
             project = home / "work" / "project"
@@ -73,6 +74,7 @@ class TestAttribution(unittest.TestCase):
             (home / ".codex" / "AGENTS.md").write_text("global agents", encoding="utf-8")
             (home / ".claude" / "CLAUDE.md").write_text("global claude", encoding="utf-8")
             (project / "AGENTS.md").write_text("project agents", encoding="utf-8")
+            (project / "CLAUDE.md").symlink_to("AGENTS.md")
             (nested / "CLAUDE.md").write_text("nested claude", encoding="utf-8")
             turn = make_turn("done")
             turn.user_msg["cwd"] = str(nested)
@@ -82,15 +84,58 @@ class TestAttribution(unittest.TestCase):
 
             documents = trace["metadata"]["instruction_documents"]
             self.assertEqual([document["path"] for document in documents], [
-                "~/.codex/AGENTS.md",
                 "~/.claude/CLAUDE.md",
-                "AGENTS.md",
+                "CLAUDE.md",
                 "packages/app/CLAUDE.md",
             ])
+            self.assertEqual(documents[1], {
+                "agent": "claude-code",
+                "path": "CLAUDE.md",
+                "scope": "project",
+                "directory_scope": ".",
+                "content": "project agents",
+                "content_hash": hashlib.sha256(b"project agents").hexdigest(),
+            })
 
-            later = hook.build_turn_events("session-1", 2, turn, Path("transcript.jsonl"))
-            later_trace = next(event for event in later if event["type"] == "trace-create")["body"]
-            self.assertNotIn("instruction_documents", later_trace["metadata"])
+    def test_later_turn_uploads_only_new_nested_instruction_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            project = home / "project"
+            nested = project / "packages" / "app"
+            (project / ".git").mkdir(parents=True)
+            nested.mkdir(parents=True)
+            (home / ".claude").mkdir()
+            (project / "CLAUDE.md").write_text("root rules", encoding="utf-8")
+            (nested / "CLAUDE.md").write_text("nested rules", encoding="utf-8")
+            first = make_turn("done")
+            first.user_msg["cwd"] = str(project)
+            later = make_turn([{
+                "type": "tool_use",
+                "id": "touch-nested",
+                "name": "Read",
+                "input": {"file_path": str(nested / "src.ts")},
+            }])
+            later.user_msg["cwd"] = str(project)
+            known: set[str] = set()
+
+            with mock.patch.object(hook.Path, "home", return_value=home):
+                first_events = hook.build_turn_events("session-1", 1, first, Path("transcript.jsonl"), known_instruction_documents=known)
+                later_events = hook.build_turn_events("session-1", 2, later, Path("transcript.jsonl"), known_instruction_documents=known)
+
+            first_documents = next(event for event in first_events if event["type"] == "trace-create")["body"]["metadata"]["instruction_documents"]
+            later_documents = next(event for event in later_events if event["type"] == "trace-create")["body"]["metadata"]["instruction_documents"]
+            self.assertEqual([document["path"] for document in first_documents], ["CLAUDE.md"])
+            self.assertEqual([document["path"] for document in later_documents], ["packages/app/CLAUDE.md"])
+
+    def test_records_images_omitted_from_session_text(self):
+        turn = make_turn("done")
+        turn.user_msg["message"]["content"] = [
+            {"type": "text", "text": "inspect this"},
+            {"type": "image", "source": {"type": "base64", "data": "abc"}},
+        ]
+
+        trace = self._trace(turn)
+        self.assertEqual(trace["metadata"]["omitted_image_count"], 1)
 
     def test_mcp_tool_is_attributed_on_span_and_tag(self):
         turn = make_turn([
