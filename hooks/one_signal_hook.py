@@ -587,7 +587,11 @@ def build_turns(rows: List[Tuple[Dict[str, Any], int]]) -> List[Turn]:
             for tr in get_tool_result_blocks(get_content_from_row(row)):
                 tid = tr.get("tool_use_id")
                 if tid:
-                    tool_results_by_id[str(tid)] = {"content": tr.get("content"), "timestamp": row_ts}
+                    tool_results_by_id[str(tid)] = {
+                        "content": tr.get("content"),
+                        "timestamp": row_ts,
+                        "is_error": tr.get("is_error"),
+                    }
             if current_turn_user_row is not None:
                 pending_end_offset = row_offset
             continue
@@ -905,6 +909,13 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
 
             tool_obs_id = f"{gen_id}-tool{t_idx + 1}"
             mcp = mcp_attribution(tname)
+            result_status = (
+                "error" if tr_entry and tr_entry.get("is_error") is True
+                # Claude Code normally omits `is_error` for successful tool
+                # results, so the presence of a matched result is success.
+                else "success" if tr_entry is not None
+                else "unknown"
+            )
             tool_events.append(_observation_create(
                 obs_id=tool_obs_id,
                 trace_id=trace_id,
@@ -927,6 +938,7 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
                 metadata={
                     "tool_name": tname,
                     "tool_id": tid,
+                    "result_status": result_status,
                     **({"mcp_server": mcp[0], "mcp_tool": mcp[1]} if mcp else {}),
                     "input_meta": tinput_meta,
                     "output_meta": out_meta,
