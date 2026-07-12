@@ -9,8 +9,10 @@ From the repo root, `pnpm test:plugins` runs this suite and the
 one-signal-codex one together.
 """
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 HOOK_PATH = Path(__file__).resolve().parent / "hooks" / "one_signal_hook.py"
@@ -58,6 +60,37 @@ class TestAttribution(unittest.TestCase):
         trace = self._trace(turn)
         self.assertEqual(trace["metadata"]["skill_names"], ["code-review"])
         self.assertIn("skill:code-review", trace["tags"])
+
+    def test_first_turn_uploads_global_and_project_instruction_documents(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            project = home / "work" / "project"
+            nested = project / "packages" / "app"
+            (project / ".git").mkdir(parents=True)
+            nested.mkdir(parents=True)
+            (home / ".codex").mkdir()
+            (home / ".claude").mkdir()
+            (home / ".codex" / "AGENTS.md").write_text("global agents", encoding="utf-8")
+            (home / ".claude" / "CLAUDE.md").write_text("global claude", encoding="utf-8")
+            (project / "AGENTS.md").write_text("project agents", encoding="utf-8")
+            (nested / "CLAUDE.md").write_text("nested claude", encoding="utf-8")
+            turn = make_turn("done")
+            turn.user_msg["cwd"] = str(nested)
+
+            with mock.patch.object(hook.Path, "home", return_value=home):
+                trace = self._trace(turn)
+
+            documents = trace["metadata"]["instruction_documents"]
+            self.assertEqual([document["path"] for document in documents], [
+                "~/.codex/AGENTS.md",
+                "~/.claude/CLAUDE.md",
+                "AGENTS.md",
+                "packages/app/CLAUDE.md",
+            ])
+
+            later = hook.build_turn_events("session-1", 2, turn, Path("transcript.jsonl"))
+            later_trace = next(event for event in later if event["type"] == "trace-create")["body"]
+            self.assertNotIn("instruction_documents", later_trace["metadata"])
 
     def test_mcp_tool_is_attributed_on_span_and_tag(self):
         turn = make_turn([
