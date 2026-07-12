@@ -687,18 +687,39 @@ def _observation_create(*, obs_id: str, trace_id: str, parent_id: Optional[str],
         "metadata": metadata,
     })
 
-def collect_skill_tags(turn: Turn) -> List[str]:
-    """Return 'skill:<name>' tags for every Skill tool invocation in the turn."""
+def collect_skill_names(turn: Turn) -> List[str]:
+    """Return every explicitly invoked Skill name once, preserving call order."""
     names: List[str] = []
     for am in turn.assistant_msgs:
         for tu in get_tool_use_blocks(get_content_from_row(am)):
             if tu.get("name") != "Skill":
                 continue
             tu_input = tu.get("input")
-            skill = tu_input.get("skill") if isinstance(tu_input, dict) else None
-            if isinstance(skill, str) and skill and f"skill:{skill}" not in names:
-                names.append(f"skill:{skill}")
+            if not isinstance(tu_input, dict):
+                continue
+            skill = next((tu_input.get(key) for key in ("name", "skill", "skill_name", "skillName")
+                          if isinstance(tu_input.get(key), str) and tu_input.get(key)), None)
+            if isinstance(skill, str) and skill not in names:
+                names.append(skill)
     return names
+
+
+def mcp_attribution(tool_name: Any) -> Optional[Tuple[str, str]]:
+    if not isinstance(tool_name, str) or not tool_name.startswith("mcp__"):
+        return None
+    parts = tool_name.split("__")
+    return (parts[1], "__".join(parts[2:])) if len(parts) >= 3 else None
+
+
+def collect_mcp_tags(turn: Turn) -> List[str]:
+    tags: List[str] = []
+    for am in turn.assistant_msgs:
+        for tool_use in get_tool_use_blocks(get_content_from_row(am)):
+            mcp = mcp_attribution(tool_use.get("name"))
+            tag = f"mcp:{mcp[0]}:{mcp[1]}" if mcp else None
+            if tag and tag not in tags:
+                tags.append(tag)
+    return tags
 
 
 def short_session_label(session_id: str, max_len: int = 12) -> str:
@@ -759,9 +780,13 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
         if isinstance(v, str) and v:
             trace_metadata[dst_key] = v
 
-    tags = ["claude-code"]
+    skill_names = collect_skill_names(turn) if SKILL_TAGS else []
+    if skill_names:
+        trace_metadata["skill_names"] = skill_names
+
+    tags = ["claude-code", *collect_mcp_tags(turn)]
     if SKILL_TAGS:
-        tags += collect_skill_tags(turn)
+        tags += [f"skill:{name}" for name in skill_names]
 
     trace_name = trace_display_name(session_id, turn_num)
     root_observation_name = f"Turn {turn_num}"
@@ -879,6 +904,7 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
                     tool_output = {"result": out_trunc, "injected_instructions": injected_trunc}
 
             tool_obs_id = f"{gen_id}-tool{t_idx + 1}"
+            mcp = mcp_attribution(tname)
             tool_events.append(_observation_create(
                 obs_id=tool_obs_id,
                 trace_id=trace_id,
@@ -901,6 +927,7 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
                 metadata={
                     "tool_name": tname,
                     "tool_id": tid,
+                    **({"mcp_server": mcp[0], "mcp_tool": mcp[1]} if mcp else {}),
                     "input_meta": tinput_meta,
                     "output_meta": out_meta,
                 },
