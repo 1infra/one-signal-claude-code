@@ -23,10 +23,12 @@ claude plugin install one-signal@one-infra --config ONE_SIGNAL_API_TOKEN=<token>
 
 Restart Claude Code after install. `claude plugin install` does not prompt
 for configuration interactively — pass it via `--config` at install time as
-above (see "Getting a token" below for `<token>`), or set/change any option
-later with `/plugin configure one-signal@one-infra` in Claude Code.
+above (see "Getting a token" below for `<token>`), or change the token later
+with `/plugin configure one-signal@one-infra` in Claude Code. The remaining
+settings below are optional environment variables with built-in defaults;
+they are intentionally not install-time options.
 
-Available options:
+Optional environment variables:
 
 | Field | Description |
 | --- | --- |
