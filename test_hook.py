@@ -305,6 +305,192 @@ class TestRedactText(unittest.TestCase):
         self.assertIn("<REDACTED:openai>", out)
         self.assertNotIn(sk, out)
 
+    def test_anthropic_sk_ant_tagged_not_openai(self):
+        # betterleaks anthropic-api-key: sk-ant-api03-{93}AA
+        tok = "sk-ant-api03-" + ("a" * 93) + "AA"
+        out = hook.redact_text(f"ANTHROPIC_API_KEY={tok}")
+        self.assertIn("<REDACTED:anthropic>", out)
+        self.assertNotIn("<REDACTED:openai>", out)
+        self.assertNotIn(tok, out)
+
+    def test_openrouter_sk_or_tagged_not_openai(self):
+        # betterleaks openrouter-api-key: sk-or-v1-{64 hex}
+        tok = "sk-or-v1-" + ("0" * 64)
+        out = hook.redact_text(f"OPENROUTER_API_KEY={tok}")
+        self.assertIn("<REDACTED:openrouter>", out)
+        self.assertNotIn("<REDACTED:openai>", out)
+        self.assertNotIn(tok, out)
+
+    def test_figma_token(self):
+        tok = "figd_" + ("A" * 40)
+        out = hook.redact_text(f"FIGMA_TOKEN={tok}")
+        self.assertIn("<REDACTED:figma>", out)
+        self.assertNotIn(tok, out)
+
+    def test_npm_token(self):
+        tok = "npm_" + ("b" * 36)
+        out = hook.redact_text(f"NPM_TOKEN={tok}")
+        self.assertIn("<REDACTED:npm>", out)
+        self.assertNotIn(tok, out)
+
+    def test_gitlab_pat(self):
+        tok = "glpat-" + ("c" * 20)
+        out = hook.redact_text(f"GITLAB_TOKEN={tok}")
+        self.assertIn("<REDACTED:gitlab>", out)
+        self.assertNotIn(tok, out)
+
+    def test_huggingface_token(self):
+        tok = "hf_" + ("d" * 34)
+        out = hook.redact_text(f"HF_TOKEN={tok}")
+        self.assertIn("<REDACTED:huggingface>", out)
+        self.assertNotIn(tok, out)
+
+    def test_supabase_tokens(self):
+        sbp = "sbp_" + ("e" * 40)
+        secret = "sb_secret_" + ("f" * 31)
+        out = hook.redact_text(f"{sbp} {secret}")
+        self.assertEqual(out.count("<REDACTED:supabase>"), 2)
+        self.assertNotIn(sbp, out)
+        self.assertNotIn(secret, out)
+
+    def test_shopify_tokens(self):
+        toks = [
+            "shpat_" + ("1" * 32),
+            "shpca_" + ("2" * 32),
+            "shppa_" + ("3" * 32),
+            "shpss_" + ("4" * 32),
+        ]
+        out = hook.redact_text(" ".join(toks))
+        self.assertEqual(out.count("<REDACTED:shopify>"), 4)
+        for t in toks:
+            self.assertNotIn(t, out)
+
+    def test_digitalocean_tokens(self):
+        toks = [
+            "dop_v1_" + ("a" * 64),
+            "doo_v1_" + ("b" * 64),
+            "dor_v1_" + ("c" * 64),
+        ]
+        out = hook.redact_text(" ".join(toks))
+        self.assertEqual(out.count("<REDACTED:digitalocean>"), 3)
+        for t in toks:
+            self.assertNotIn(t, out)
+
+    def test_databricks_token(self):
+        tok = "dapi" + ("a" * 32)
+        out = hook.redact_text(f"DATABRICKS_TOKEN={tok}")
+        self.assertIn("<REDACTED:databricks>", out)
+        self.assertNotIn(tok, out)
+
+    def test_sendgrid_token(self):
+        tok = "SG." + ("A" * 66)
+        out = hook.redact_text(f"SENDGRID_API_KEY={tok}")
+        self.assertIn("<REDACTED:sendgrid>", out)
+        self.assertNotIn(tok, out)
+
+    def test_telegram_bot_token(self):
+        # telegram-bot-api-token shape: {5,16 digits}:A{34 body}
+        tok = "123456789:A" + ("B" * 34)
+        out = hook.redact_text(f"BOT_TOKEN={tok}")
+        self.assertIn("<REDACTED:telegram>", out)
+        self.assertNotIn(tok, out)
+
+    def test_airtable_pat(self):
+        tok = "pat" + ("A" * 14) + "." + ("a" * 64)
+        out = hook.redact_text(f"AIRTABLE_PAT={tok}")
+        self.assertIn("<REDACTED:airtable>", out)
+        self.assertNotIn(tok, out)
+
+    def test_grafana_tokens(self):
+        glc = "glc_" + ("A" * 40) + "=="
+        glsa = "glsa_" + ("B" * 32) + "_" + ("c" * 8)
+        out = hook.redact_text(f"{glc} {glsa}")
+        self.assertEqual(out.count("<REDACTED:grafana>"), 2)
+        self.assertNotIn(glc, out)
+        self.assertNotIn(glsa, out)
+
+    def test_sentry_tokens(self):
+        # sntrys_eyJpYXQiO… distinctive prefix from sentry-org-token
+        sntrys = "sntrys_eyJpYXQiO" + ("A" * 40) + "_" + ("B" * 43)
+        sntryu = "sntryu_" + ("a" * 64)
+        out = hook.redact_text(f"{sntrys} {sntryu}")
+        self.assertEqual(out.count("<REDACTED:sentry>"), 2)
+        self.assertNotIn(sntrys, out)
+        self.assertNotIn(sntryu, out)
+
+    def test_fly_fo1_token(self):
+        tok = "fo1_" + ("x" * 43)
+        out = hook.redact_text(f"FLY_API_TOKEN={tok}")
+        self.assertIn("<REDACTED:fly>", out)
+        self.assertNotIn(tok, out)
+
+    def test_groq_token(self):
+        tok = "gsk_" + ("A" * 52)
+        out = hook.redact_text(f"GROQ_API_KEY={tok}")
+        self.assertIn("<REDACTED:groq>", out)
+        self.assertNotIn(tok, out)
+
+    def test_xai_token(self):
+        tok = "xai-" + ("A" * 80)
+        out = hook.redact_text(f"XAI_API_KEY={tok}")
+        self.assertIn("<REDACTED:xai>", out)
+        self.assertNotIn(tok, out)
+
+    def test_perplexity_token(self):
+        tok = "pplx-" + ("A" * 48)
+        out = hook.redact_text(f"PPLX_API_KEY={tok}")
+        self.assertIn("<REDACTED:perplexity>", out)
+        self.assertNotIn(tok, out)
+
+    def test_replicate_token(self):
+        tok = "r8_" + ("A" * 37)
+        out = hook.redact_text(f"REPLICATE_API_TOKEN={tok}")
+        self.assertIn("<REDACTED:replicate>", out)
+        self.assertNotIn(tok, out)
+
+    def test_doppler_token(self):
+        tok = "dp.pt." + ("a" * 43)
+        out = hook.redact_text(f"DOPPLER_TOKEN={tok}")
+        self.assertIn("<REDACTED:doppler>", out)
+        self.assertNotIn(tok, out)
+
+    def test_linear_token(self):
+        tok = "lin_api_" + ("a" * 40)
+        out = hook.redact_text(f"LINEAR_API_KEY={tok}")
+        self.assertIn("<REDACTED:linear>", out)
+        self.assertNotIn(tok, out)
+
+    def test_notion_token(self):
+        # ntn_ + 11 digits + 35 alnum (betterleaks notion-api-token)
+        tok = "ntn_" + ("1" * 11) + ("A" * 35)
+        out = hook.redact_text(f"NOTION_TOKEN={tok}")
+        self.assertIn("<REDACTED:notion>", out)
+        self.assertNotIn(tok, out)
+
+    def test_postman_token(self):
+        tok = "PMAK-" + ("a" * 24) + "-" + ("b" * 34)
+        out = hook.redact_text(f"POSTMAN_API_KEY={tok}")
+        self.assertIn("<REDACTED:postman>", out)
+        self.assertNotIn(tok, out)
+
+    def test_1password_service_account_token(self):
+        # ops_eyJ + ≥250 base64 body (1password-service-account-token)
+        tok = "ops_eyJ" + ("A" * 250) + "=="
+        out = hook.redact_text(f"OP_SERVICE_ACCOUNT_TOKEN={tok}")
+        self.assertIn("<REDACTED:1password>", out)
+        self.assertNotIn(tok, out)
+
+    def test_vercel_tokens(self):
+        toks = [
+            "vcp_" + ("A" * 56),
+            "vck_" + ("B" * 56),
+            "vci_" + ("C" * 56),
+        ]
+        out = hook.redact_text(" ".join(toks))
+        self.assertEqual(out.count("<REDACTED:vercel>"), 3)
+        for t in toks:
+            self.assertNotIn(t, out)
+
     def test_slack_token(self):
         tok = "xoxb-" + ("1" * 12)
         out = hook.redact_text(f"SLACK_BOT_TOKEN={tok}")
@@ -374,6 +560,27 @@ class TestRedactText(unittest.TestCase):
         # Word-boundary + length bound: short "sk-" fragments in skill names
         # must not fire (no entropy scan, known-format only).
         lookalike = "skill-name-with-sk-prefix"
+        self.assertEqual(hook.redact_text(lookalike), lookalike)
+
+    def test_sk_ant_lookalike_too_short_untouched(self):
+        # Too short for anthropic shape AND for generic sk- {20,} body.
+        lookalike = "sk-ant-short"
+        self.assertEqual(hook.redact_text(lookalike), lookalike)
+
+    def test_sk_or_lookalike_too_short_untouched(self):
+        lookalike = "sk-or-v1-deadbeef"
+        self.assertEqual(hook.redact_text(lookalike), lookalike)
+
+    def test_figma_lookalike_too_short_untouched(self):
+        lookalike = "figd_short"
+        self.assertEqual(hook.redact_text(lookalike), lookalike)
+
+    def test_npm_lookalike_too_short_untouched(self):
+        lookalike = "npm_notalongenoughtoken"
+        self.assertEqual(hook.redact_text(lookalike), lookalike)
+
+    def test_gitlab_lookalike_too_short_untouched(self):
+        lookalike = "glpat-short"
         self.assertEqual(hook.redact_text(lookalike), lookalike)
 
     def test_plain_url_without_password_unchanged(self):

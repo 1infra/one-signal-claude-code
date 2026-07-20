@@ -367,16 +367,58 @@ def truncate_text(s: str, max_chars: int = MAX_CHARS) -> Tuple[str, Dict[str, An
 _REDACTED_PLACEHOLDER_RE = re.compile(r"<REDACTED(?::[^>]*)?>")
 
 # Token / PEM patterns → <REDACTED:class>
+# Provider shapes harvested from betterleaks v1.5.0 (config/betterleaks.toml +
+# cmd/generate/config/rules/*.go) and, where absent there, gitleaks master
+# config/gitleaks.toml. Only anchored literal prefixes with bounded charset/
+# length — no bare-hex/base64 entropy rules. More-specific sk-* prefixes
+# (sk-ant-, sk-or-) MUST stay above the generic sk- rule so tags are correct.
 _REDACT_TOKEN_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "aws"),
     (re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255}\b"), "github"),
     (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b"), "github"),
+    # Anthropic before generic sk- (betterleaks: anthropic-api-key / anthropic-admin-api-key)
+    (re.compile(r"\bsk-ant-(?:api03|admin01)-[a-zA-Z0-9_-]{93}AA\b"), "anthropic"),
+    # OpenRouter before generic sk- (betterleaks: openrouter-api-key)
+    (re.compile(r"\bsk-or-v1-[0-9a-fA-F]{64}\b"), "openrouter"),
     # Stripe before generic sk- so sk_live_ / rk_test_ get the stripe tag
     # (they use underscores; sk- uses a hyphen — no real overlap, order is clarity).
     (re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"), "stripe"),
     (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "openai"),
     (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "slack"),
     (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "google"),
+    # SaaS provider tokens (anchored prefixes; sources noted per rule id)
+    (re.compile(r"\bfigd_[A-Za-z0-9_-]{38,42}\b"), "figma"),  # figma-personal-access-token
+    (re.compile(r"\bnpm_[A-Za-z0-9]{36}\b"), "npm"),  # npm-access-token
+    (re.compile(r"\bglpat-[\w.-]{20,}\b"), "gitlab"),  # gitlab-pat (+ routable)
+    (re.compile(r"\bhf_[A-Za-z]{34}\b"), "huggingface"),  # huggingface-access-token
+    (re.compile(r"\bsbp_[a-z0-9_-]{40}\b"), "supabase"),  # supabase-management-token
+    (re.compile(r"\bsb_secret_[A-Za-z0-9_-]{31}\b"), "supabase"),  # supabase-project-api-key
+    (re.compile(r"\bshp(?:at|ca|pa|ss)_[a-fA-F0-9]{32}\b"), "shopify"),  # shopify-*-token/secret
+    (re.compile(r"\b(?:dop|doo|dor)_v1_[a-f0-9]{64}\b"), "digitalocean"),  # digitalocean-*
+    (re.compile(r"\bdapi[a-f0-9]{32}(?:-\d)?\b"), "databricks"),  # databricks-api-token
+    # SendGrid body may end with non-word (=); no trailing \b (sendgrid-api-token)
+    (re.compile(r"\bSG\.[A-Za-z0-9=_.-]{66}"), "sendgrid"),
+    # Telegram bot: structural shape from telegram-bot-api-token (no keyword gate)
+    (re.compile(r"\b[0-9]{5,16}:A[A-Za-z0-9_-]{34}\b"), "telegram"),
+    (re.compile(r"\bpat[A-Za-z0-9]{14}\.[a-f0-9]{64}\b"), "airtable"),  # airtable-personnal-access-token
+    (re.compile(r"\bglc_[A-Za-z0-9+/]{40,150}={0,2}"), "grafana"),  # grafana-cloud-api-token
+    (re.compile(r"\bglsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}\b"), "grafana"),  # grafana-service-account-token
+    # sntrys_eyJpYXQiO… is the distinctive prefix from sentry-org-token
+    (re.compile(r"\bsntrys_eyJpYXQiO[A-Za-z0-9+/=_]{30,}"), "sentry"),
+    (re.compile(r"\bsntryu_[a-f0-9]{64}\b"), "sentry"),  # sentry-user-token
+    (re.compile(r"\bfo1_[\w-]{43}\b"), "fly"),  # gitleaks flyio-access-token
+    (re.compile(r"\bgsk_[A-Za-z0-9]{52}\b"), "groq"),  # groq-api-key
+    (re.compile(r"\bxai-[A-Za-z0-9_-]{70,120}\b"), "xai"),  # xai-api-key
+    (re.compile(r"\bpplx-[A-Za-z0-9]{48}\b"), "perplexity"),  # perplexity-api-key
+    (re.compile(r"\br8_[A-Za-z0-9]{37}\b"), "replicate"),  # replicate-api-token
+    (re.compile(r"\bdp\.pt\.[A-Za-z0-9]{43}\b"), "doppler"),  # doppler-api-token
+    (re.compile(r"\blin_api_[A-Za-z0-9]{40}\b"), "linear"),  # linear-api-key
+    (re.compile(r"\bntn_[0-9]{11}[A-Za-z0-9]{35}\b"), "notion"),  # notion-api-token
+    (re.compile(r"\bPMAK-[a-fA-F0-9]{24}-[a-fA-F0-9]{34}\b"), "postman"),  # postman-api-token
+    # 1password service account tokens end with base64 padding (1password-service-account-token)
+    (re.compile(r"\bops_eyJ[a-zA-Z0-9+/]{250,}={0,3}"), "1password"),
+    # Vercel anchored formats (vcp_/vca_/vcr_/vci_/vck_) — vercel-*-token rules
+    (re.compile(r"\bvc[aikpr]_[A-Za-z0-9_-]{56}\b"), "vercel"),
     (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b"), "jwt"),
     (
         re.compile(
