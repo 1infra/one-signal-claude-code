@@ -10,6 +10,7 @@ one-signal-codex one together.
 """
 import importlib.util
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -277,6 +278,170 @@ class TestAttribution(unittest.TestCase):
         self.assertIsNone(hook.mcp_attribution("mcp____x"))
         self.assertIsNone(hook.mcp_attribution("Bash"))
         self.assertIsNone(hook.mcp_attribution(None))
+
+
+class TestRedactText(unittest.TestCase):
+    """Pre-upload secret redaction: known-format tokens, URI passwords, idempotency."""
+
+    # --- Positive: each token class → correct class tag ---
+
+    def test_aws_access_key_id(self):
+        raw = "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE"
+        out = hook.redact_text(raw)
+        self.assertIn("<REDACTED:aws>", out)
+        self.assertNotIn("AKIAIOSFODNN7EXAMPLE", out)
+
+    def test_github_pat_and_token_prefix(self):
+        ghp = "ghp_" + ("a" * 36)
+        fine = "github_pat_" + ("b" * 22)
+        out = hook.redact_text(f"token={ghp} fine={fine}")
+        self.assertEqual(out.count("<REDACTED:github>"), 2)
+        self.assertNotIn(ghp, out)
+        self.assertNotIn(fine, out)
+
+    def test_openai_anthropic_sk_style(self):
+        sk = "sk-" + ("x" * 20)
+        out = hook.redact_text(f"OPENAI_API_KEY={sk}")
+        self.assertIn("<REDACTED:openai>", out)
+        self.assertNotIn(sk, out)
+
+    def test_slack_token(self):
+        tok = "xoxb-" + ("1" * 12)
+        out = hook.redact_text(f"SLACK_BOT_TOKEN={tok}")
+        self.assertIn("<REDACTED:slack>", out)
+        self.assertNotIn(tok, out)
+
+    def test_google_api_key(self):
+        key = "AIza" + ("C" * 35)
+        out = hook.redact_text(f"key={key}")
+        self.assertIn("<REDACTED:google>", out)
+        self.assertNotIn(key, out)
+
+    def test_stripe_key(self):
+        live = "sk_live_" + ("d" * 16)
+        test = "rk_test_" + ("e" * 16)
+        out = hook.redact_text(f"{live} {test}")
+        self.assertEqual(out.count("<REDACTED:stripe>"), 2)
+        self.assertNotIn(live, out)
+        self.assertNotIn(test, out)
+
+    def test_jwt(self):
+        jwt = "eyJhbGciOiJIUzI1NiJ9." + ("a" * 12) + "." + ("b" * 8)
+        out = hook.redact_text(f"Bearer {jwt}")
+        self.assertIn("<REDACTED:jwt>", out)
+        self.assertNotIn(jwt, out)
+
+    def test_pem_private_key_block(self):
+        pem = (
+            "-----BEGIN RSA PRIVATE KEY-----\n"
+            "MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF6PZGBw=\n"
+            "-----END RSA PRIVATE KEY-----"
+        )
+        out = hook.redact_text(f"key material:\n{pem}\ndone")
+        self.assertIn("<REDACTED:pem>", out)
+        self.assertNotIn("BEGIN RSA PRIVATE KEY", out)
+        self.assertNotIn("MIIEowIBAAKCAQEA", out)
+        self.assertIn("key material:", out)
+        self.assertIn("done", out)
+
+    def test_db_connection_string_masks_only_password(self):
+        raw = "postgres://alice:s3cret-pass@db.example.com:5432/app"
+        out = hook.redact_text(raw)
+        self.assertEqual(out, "postgres://alice:<REDACTED>@db.example.com:5432/app")
+        self.assertNotIn("s3cret-pass", out)
+
+    def test_mongodb_srv_and_redis_connection_strings(self):
+        mongo = "mongodb+srv://u:p@cluster0.example.net/db"
+        redis = "rediss://cache:hunter2@redis.internal:6380/0"
+        self.assertEqual(
+            hook.redact_text(mongo),
+            "mongodb+srv://u:<REDACTED>@cluster0.example.net/db",
+        )
+        self.assertEqual(
+            hook.redact_text(redis),
+            "rediss://cache:<REDACTED>@redis.internal:6380/0",
+        )
+
+    def test_generic_uri_with_embedded_password(self):
+        raw = "https://deploy:topsecret@ci.example.com/hooks"
+        out = hook.redact_text(raw)
+        self.assertEqual(out, "https://deploy:<REDACTED>@ci.example.com/hooks")
+        self.assertNotIn("topsecret", out)
+
+    # --- Negative: lookalikes / plain URLs stay intact ---
+
+    def test_sk_lookalike_without_word_boundary_length_is_untouched(self):
+        # Word-boundary + length bound: short "sk-" fragments in skill names
+        # must not fire (no entropy scan, known-format only).
+        lookalike = "skill-name-with-sk-prefix"
+        self.assertEqual(hook.redact_text(lookalike), lookalike)
+
+    def test_plain_url_without_password_unchanged(self):
+        url = "https://example.com/path?q=1"
+        self.assertEqual(hook.redact_text(url), url)
+
+    def test_non_secret_text_unchanged(self):
+        plain = "please run the tests and open a PR"
+        self.assertEqual(hook.redact_text(plain), plain)
+
+    # --- Idempotency ---
+
+    def test_idempotent_double_pass(self):
+        raw = (
+            "aws=AKIAIOSFODNN7EXAMPLE "
+            "sk=" + ("sk-" + "z" * 24) + " "
+            "db=postgres://u:pass@host/db "
+            "url=https://user:pw@api.example.com/v1"
+        )
+        once = hook.redact_text(raw)
+        twice = hook.redact_text(once)
+        self.assertEqual(once, twice)
+        # Placeholders themselves must not be re-eaten / nested.
+        self.assertNotIn("<REDACTED:<REDACTED", twice)
+        self.assertIn("<REDACTED:aws>", twice)
+        self.assertIn("<REDACTED:openai>", twice)
+        self.assertIn("postgres://u:<REDACTED>@host/db", twice)
+        self.assertIn("https://user:<REDACTED>@api.example.com/v1", twice)
+
+    def test_already_redacted_placeholder_preserved(self):
+        raw = "token=<REDACTED:aws> still ok"
+        self.assertEqual(hook.redact_text(raw), raw)
+
+    # --- End-to-end via real build_turn_events pipeline ---
+
+    def test_tool_span_body_masks_secret_via_pipeline(self):
+        secret = "sk-" + ("pipeline" + "0" * 20)  # length-bounded sk- token
+        turn = make_turn([
+            {
+                "type": "tool_use",
+                "id": "tool-1",
+                "name": "Bash",
+                "input": {"command": f"echo {secret}"},
+            },
+        ])
+        turn.user_msg["message"]["content"] = f"run with key {secret}"
+        turn.tool_results_by_id = {
+            "tool-1": {
+                "content": f"stdout: using {secret}",
+                "timestamp": "2026-07-12T00:00:02Z",
+            },
+        }
+        events = hook.build_turn_events("session-1", 1, turn, Path("transcript.jsonl"))
+        tool = next(
+            event["body"] for event in events
+            if (event["body"].get("metadata") or {}).get("tool_name") == "Bash"
+        )
+        # Free-text fields on the tool span (input + output) must be masked.
+        self.assertNotIn(secret, json.dumps(tool["input"]))
+        self.assertNotIn(secret, json.dumps(tool["output"]))
+        self.assertIn("<REDACTED:openai>", json.dumps(tool["input"]))
+        self.assertIn("<REDACTED:openai>", json.dumps(tool["output"]))
+        # Trace user/assistant free text also redacted; ids/metadata keys untouched.
+        trace = next(e["body"] for e in events if e["type"] == "trace-create")
+        self.assertNotIn(secret, json.dumps(trace["input"]))
+        self.assertIn("<REDACTED:openai>", json.dumps(trace["input"]))
+        self.assertEqual(tool["metadata"]["tool_name"], "Bash")
+        self.assertEqual(tool["metadata"]["tool_id"], "tool-1")
 
 
 if __name__ == "__main__":

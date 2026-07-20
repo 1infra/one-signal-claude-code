@@ -36,6 +36,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -351,6 +352,110 @@ def truncate_text(s: str, max_chars: int = MAX_CHARS) -> Tuple[str, Dict[str, An
         return s, {"truncated": False, "orig_len": orig_len}
     head = s[:max_chars]
     return head, {"truncated": True, "orig_len": orig_len, "kept_len": len(head), "sha256": hashlib.sha256(s.encode("utf-8")).hexdigest()}
+
+
+# ----------------- Pre-upload secret redaction (plugin-side) -----------------
+# Light, low-false-positive pass so known-format secrets never leave the machine.
+# Server-side redaction remains defense-in-depth. No entropy detection in v1 —
+# only anchored provider tokens, PEM blocks, and URI passwords.
+#
+# Applied to free-text fields just before they enter an ingestion event body
+# (user/assistant text, tool input/output, injected skill text). Not applied to
+# ids, timestamps, model names, metadata keys, instruction_documents, or usage.
+
+# Existing placeholders must stay stable under a second pass (idempotent).
+_REDACTED_PLACEHOLDER_RE = re.compile(r"<REDACTED(?::[^>]*)?>")
+
+# Token / PEM patterns → <REDACTED:class>
+_REDACT_TOKEN_PATTERNS: List[Tuple[re.Pattern[str], str]] = [
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "aws"),
+    (re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,255}\b"), "github"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{22,255}\b"), "github"),
+    # Stripe before generic sk- so sk_live_ / rk_test_ get the stripe tag
+    # (they use underscores; sk- uses a hyphen — no real overlap, order is clarity).
+    (re.compile(r"\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}\b"), "stripe"),
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"), "openai"),
+    (re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), "slack"),
+    (re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "google"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\b"), "jwt"),
+    (
+        re.compile(
+            r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
+            re.DOTALL,
+        ),
+        "pem",
+    ),
+]
+
+# DB schemes with credentials: mask only the password segment.
+_REDACT_DB_URI_RE = re.compile(
+    r"((?:postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|rediss|amqp)://"
+    r"[^:/\s]+):([^@\s]+)@"
+)
+
+# Generic scheme://user:password@host — mask only the password segment.
+# Applied after DB URIs so both land on the same user:<REDACTED>@ shape.
+_REDACT_GENERIC_URI_RE = re.compile(
+    r"([a-z][a-z0-9+.-]*://[^:/\s]+):([^@\s]+)@"
+)
+
+
+def redact_text(s: str) -> str:
+    """Redact known-format secrets from free text before upload.
+
+    Pure and idempotent: running twice yields the same string; never rewrites
+    an existing <REDACTED...> placeholder. Returns non-strings / empty as-is
+    (empty string for None).
+    """
+    if s is None:
+        return ""
+    if not isinstance(s, str) or not s:
+        return s if isinstance(s, str) else ""
+
+    # Protect existing placeholders so a second pass cannot nest or re-match
+    # inside them (e.g. password already replaced with <REDACTED>).
+    placeholders: List[str] = []
+
+    def _protect(match: re.Match[str]) -> str:
+        placeholders.append(match.group(0))
+        return f"\x00R{len(placeholders) - 1}\x00"
+
+    text = _REDACTED_PLACEHOLDER_RE.sub(_protect, s)
+
+    for pattern, tag in _REDACT_TOKEN_PATTERNS:
+        text = pattern.sub(f"<REDACTED:{tag}>", text)
+
+    def _mask_password(match: re.Match[str]) -> str:
+        # Skip if this password is a protected placeholder from a prior pass.
+        password = match.group(2)
+        if password.startswith("\x00R") and password.endswith("\x00"):
+            return match.group(0)
+        return f"{match.group(1)}:<REDACTED>@"
+
+    text = _REDACT_DB_URI_RE.sub(_mask_password, text)
+    text = _REDACT_GENERIC_URI_RE.sub(_mask_password, text)
+
+    def _restore(match: re.Match[str]) -> str:
+        idx = int(match.group(1))
+        return placeholders[idx]
+
+    return re.sub(r"\x00R(\d+)\x00", _restore, text)
+
+
+def _redact_value(value: Any) -> Any:
+    """Walk dict/list structures and apply redact_text to every string leaf.
+
+    Used for structured tool inputs (e.g. {"command": "echo sk-..."}) so secrets
+    nested in free-text fields are masked without touching non-string leaves
+    (numbers, bools) or dict keys.
+    """
+    if isinstance(value, str):
+        return redact_text(value)
+    if isinstance(value, dict):
+        return {k: _redact_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(v) for v in value]
+    return value
 
 def get_model(msg: Dict[str, Any]) -> str:
     m = msg.get("message")
@@ -900,9 +1005,12 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
 
     user_text_raw = extract_text(get_content_from_row(turn.user_msg))
     user_text, user_text_meta = truncate_text(user_text_raw)
+    # Pre-upload redaction: free-text only, just before it enters the event body.
+    user_text = redact_text(user_text)
 
     last_assistant = turn.assistant_msgs[-1]
     final_assistant_text, _ = truncate_text(extract_text(get_content_from_row(last_assistant)))
+    final_assistant_text = redact_text(final_assistant_text)
 
     user_ts = parse_timestamp(turn.user_msg)
     last_assistant_ts = parse_timestamp(last_assistant)
@@ -990,6 +1098,7 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
         am_ts = parse_timestamp(am)
         am_text_raw = extract_text(get_content_from_row(am))
         am_text, am_text_meta = truncate_text(am_text_raw)
+        am_text = redact_text(am_text)
         model = get_model(am)
         tool_uses = get_tool_use_blocks(get_content_from_row(am))
 
@@ -1010,8 +1119,10 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
             tu_input = tu.get("input")
             if isinstance(tu_input, str):
                 tu_input_serialized, _ = truncate_text(tu_input)
+                tu_input_serialized = redact_text(tu_input_serialized)
             else:
-                tu_input_serialized = tu_input
+                # Structured tool input: redact free-text string leaves only.
+                tu_input_serialized = _redact_value(tu_input)
             gen_tool_calls.append({
                 "id": tu.get("id"),
                 "name": tu.get("name"),
@@ -1038,14 +1149,16 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
             tinput_raw = tu.get("input") if isinstance(tu.get("input"), (dict, list, str, int, float, bool)) else {}
             if isinstance(tinput_raw, str):
                 tinput, tinput_meta = truncate_text(tinput_raw)
+                tinput = redact_text(tinput)
             else:
-                tinput, tinput_meta = tinput_raw, None
+                tinput, tinput_meta = _redact_value(tinput_raw), None
 
             tr_entry = turn.tool_results_by_id.get(tid) if tid else None
             if tr_entry:
                 out_raw = tr_entry.get("content")
                 out_str = out_raw if isinstance(out_raw, str) else json.dumps(out_raw, ensure_ascii=False)
                 out_trunc, out_meta = truncate_text(out_str)
+                out_trunc = redact_text(out_trunc)
                 tr_ts = parse_timestamp(tr_entry.get("timestamp"))
             else:
                 out_trunc, out_meta, tr_ts = None, None, None
@@ -1059,6 +1172,7 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
                 injected = turn.injected_by_tool_id.get(tid) if tid else None
                 if injected:
                     injected_trunc, _ = truncate_text(injected)
+                    injected_trunc = redact_text(injected_trunc)
                     tool_output = {"result": out_trunc, "injected_instructions": injected_trunc}
 
             tool_obs_id = f"{gen_id}-tool{t_idx + 1}"
