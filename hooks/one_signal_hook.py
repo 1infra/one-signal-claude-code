@@ -48,7 +48,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-PLUGIN_VERSION = "0.0.5"
+PLUGIN_VERSION = "0.0.6"
 
 # --- Paths ---
 STATE_DIR = Path.home() / ".claude" / "state"
@@ -853,10 +853,26 @@ def _observation_create(*, obs_id: str, trace_id: str, parent_id: Optional[str],
     # providedModelName stays null and Models analytics is empty (verified
     # 2026-07-20 against production Langfuse). GENERATION observations must
     # use envelope type generation-create with the same body fields; body.type
-    # is omitted (the event type implies GENERATION). SPAN and EVENT stay on
-    # observation-create.
-    is_generation = obs_type == "GENERATION"
-    event_type = "generation-create" if is_generation else "observation-create"
+    # is omitted (the event type implies GENERATION).
+    #
+    # Additionally (same 2026-07-20 4-way matrix): classic observation-create
+    # / observation-update DROP body.environment (obs lands in env "default",
+    # invisible to org-scoped reads) and body.model. Typed envelopes
+    # (span-create / generation-create / event-create; and their *-update
+    # counterparts where applicable) honor both. There is no event-update
+    # variant — if an EVENT is ever re-emitted, re-send event-create with the
+    # same id. All typed envelopes omit body.type (implied by the event type).
+    # This hook currently only emits creates (no partial-turn update path).
+    if obs_type == "GENERATION":
+        event_type = "generation-create"
+    elif obs_type == "SPAN":
+        event_type = "span-create"
+    elif obs_type == "EVENT":
+        # No event-update in the typed API; re-emit event-create with same id.
+        event_type = "event-create"
+    else:
+        # Unreachable under current callers; classic fallback keeps body.type.
+        event_type = "observation-create"
     body: Dict[str, Any] = {
         "id": obs_id,
         "traceId": trace_id,
@@ -871,7 +887,9 @@ def _observation_create(*, obs_id: str, trace_id: str, parent_id: Optional[str],
         "metadata": metadata,
         "level": level,
     }
-    if not is_generation:
+    # Typed envelopes imply the observation kind; classic fallback still needs
+    # body.type so the ingest endpoint accepts the row.
+    if event_type == "observation-create":
         body["type"] = obs_type
     return _event_envelope(event_type, body)
 

@@ -1,7 +1,7 @@
 {
   "name": "one-signal",
   "description": "One Signal × Claude Code — trace every session (turns, tool calls, tokens, cost) to your One Infra organization",
-  "version": "0.0.5",
+  "version": "0.0.6",
   "author": {
     "name": "One Infra"
   },

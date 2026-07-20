@@ -188,6 +188,14 @@ class TestAttribution(unittest.TestCase):
         # Failed tool SPANs must set observation-level level=ERROR so the
         # server's errorRate metric (share of level==ERROR) is non-zero.
         self.assertEqual(tool["level"], "ERROR")
+        # Typed span-create is required so level + environment reach org scope
+        # (classic observation-create drops both).
+        tool_event = next(
+            event for event in events
+            if (event["body"].get("metadata") or {}).get("tool_name") == "Bash"
+        )
+        self.assertEqual(tool_event["type"], "span-create")
+        self.assertNotIn("type", tool_event["body"])
 
     def test_successful_tool_span_omits_level(self):
         turn = make_turn([
@@ -620,6 +628,9 @@ class TestRedactText(unittest.TestCase):
         # observation-create + body.model does not populate providedModelName;
         # generation-create does (see _observation_create). body.type must be
         # omitted for generation-create (event type implies GENERATION).
+        # Classic observation-create/update also DROP body.environment (obs
+        # lands in env "default") — verified 2026-07-20 4-way matrix; all
+        # observations must use typed envelopes.
         turn = make_turn("hello from assistant")
         turn.assistant_msgs[0]["message"]["model"] = "claude-test-model"
         turn.assistant_msgs[0]["message"]["usage"] = {
@@ -627,19 +638,19 @@ class TestRedactText(unittest.TestCase):
             "output_tokens": 5,
         }
         events = hook.build_turn_events("session-1", 1, turn, Path("transcript.jsonl"))
+        self.assertFalse(any(
+            e["type"] in ("observation-create", "observation-update") for e in events
+        ))
         generations = [e for e in events if e["type"] == "generation-create"]
         self.assertGreaterEqual(len(generations), 1)
         gen = generations[0]
         self.assertNotIn("type", gen["body"])
         self.assertEqual(gen["body"].get("model"), "claude-test-model")
         self.assertEqual(gen["body"].get("usageDetails"), {"input": 10, "output": 5})
-        # SPAN / EVENT stay on observation-create.
-        spans = [e for e in events if e["type"] == "observation-create"]
-        self.assertTrue(any(e["body"].get("type") == "SPAN" for e in spans))
-        self.assertFalse(any(
-            e["type"] == "observation-create" and e["body"].get("type") == "GENERATION"
-            for e in events
-        ))
+        # SPAN uses span-create (typed); body.type is implied by the envelope.
+        spans = [e for e in events if e["type"] == "span-create"]
+        self.assertTrue(any(e["body"].get("name") == "Turn 1" for e in spans))
+        self.assertTrue(all("type" not in e["body"] for e in spans))
 
     def test_tool_span_body_masks_secret_via_pipeline(self):
         secret = "sk-" + ("pipeline" + "0" * 20)  # length-bounded sk- token
