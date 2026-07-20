@@ -184,6 +184,62 @@ class TestAttribution(unittest.TestCase):
         )
 
         self.assertEqual(tool["metadata"]["result_status"], "error")
+        # Failed tool SPANs must set observation-level level=ERROR so the
+        # server's errorRate metric (share of level==ERROR) is non-zero.
+        self.assertEqual(tool["level"], "ERROR")
+
+    def test_successful_tool_span_omits_level(self):
+        turn = make_turn([
+            {"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {"command": "ls"}},
+        ])
+        turn.tool_results_by_id = {
+            "tool-1": {"content": "ok", "timestamp": "2026-07-12T00:00:02Z"},
+        }
+        events = hook.build_turn_events("session-1", 1, turn, Path("transcript.jsonl"))
+        tool = next(
+            event["body"] for event in events
+            if (event["body"].get("metadata") or {}).get("tool_name") == "Bash"
+        )
+        self.assertEqual(tool["metadata"]["result_status"], "success")
+        # Unset level is coerced to DEFAULT server-side; do not send DEFAULT
+        # explicitly, and do not set level on successful tools.
+        self.assertNotIn("level", tool)
+
+    def test_mcp_tool_error_sets_observation_level_error(self):
+        rows = [
+            ({"type": "user", "timestamp": "2026-07-12T00:00:00Z", "message": {"content": "get pr"}}, 1),
+            ({
+                "type": "assistant",
+                "timestamp": "2026-07-12T00:00:01Z",
+                "message": {
+                    "id": "msg-1",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "mcp-1",
+                        "name": "mcp__github__get_pull_request",
+                        "input": {"number": 42},
+                    }],
+                },
+            }, 2),
+            ({
+                "type": "user",
+                "timestamp": "2026-07-12T00:00:02Z",
+                "message": {"content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "mcp-1",
+                    "content": "not found",
+                    "is_error": True,
+                }]},
+            }, 3),
+        ]
+        turn = hook.build_turns(rows)[0]
+        events = hook.build_turn_events("session-1", 1, turn, Path("transcript.jsonl"))
+        mcp = next(
+            event["body"] for event in events
+            if (event["body"].get("metadata") or {}).get("mcp_server") == "github"
+        )
+        self.assertEqual(mcp["metadata"]["result_status"], "error")
+        self.assertEqual(mcp["level"], "ERROR")
 
     def test_skill_tags_flag_gates_both_tags_and_metadata(self):
         hook.SKILL_TAGS = False

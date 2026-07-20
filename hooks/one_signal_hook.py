@@ -691,7 +691,10 @@ def _observation_create(*, obs_id: str, trace_id: str, parent_id: Optional[str],
                          name: str, start_time: Optional[datetime], end_time: Optional[datetime],
                          input_: Any = None, output: Any = None, model: Optional[str] = None,
                          usage_details: Optional[Dict[str, int]] = None,
-                         metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                         metadata: Optional[Dict[str, Any]] = None,
+                         level: Optional[str] = None) -> Dict[str, Any]:
+    # `level` is optional: omit for DEFAULT (server coerces unset → DEFAULT).
+    # Only failed tool SPANs pass level="ERROR" so errorRate is non-zero.
     return _event_envelope("observation-create", {
         "id": obs_id,
         "traceId": trace_id,
@@ -705,6 +708,7 @@ def _observation_create(*, obs_id: str, trace_id: str, parent_id: Optional[str],
         "model": model,
         "usageDetails": usage_details,
         "metadata": metadata,
+        "level": level,
     })
 
 def collect_skill_names(turn: Turn) -> List[str]:
@@ -1093,6 +1097,9 @@ def build_turn_events(session_id: str, turn_num: int, turn: Turn, transcript_pat
                     "input_meta": tinput_meta,
                     "output_meta": out_meta,
                 },
+                # Langfuse observation level drives server errorRate. Only set on
+                # failed tools (plain + MCP share this path); success omits the key.
+                level="ERROR" if result_status == "error" else None,
             ))
 
             batch_tool_results.append({
