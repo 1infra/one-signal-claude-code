@@ -616,6 +616,31 @@ class TestRedactText(unittest.TestCase):
 
     # --- End-to-end via real build_turn_events pipeline ---
 
+    def test_generation_uses_generation_create_envelope(self):
+        # observation-create + body.model does not populate providedModelName;
+        # generation-create does (see _observation_create). body.type must be
+        # omitted for generation-create (event type implies GENERATION).
+        turn = make_turn("hello from assistant")
+        turn.assistant_msgs[0]["message"]["model"] = "claude-test-model"
+        turn.assistant_msgs[0]["message"]["usage"] = {
+            "input_tokens": 10,
+            "output_tokens": 5,
+        }
+        events = hook.build_turn_events("session-1", 1, turn, Path("transcript.jsonl"))
+        generations = [e for e in events if e["type"] == "generation-create"]
+        self.assertGreaterEqual(len(generations), 1)
+        gen = generations[0]
+        self.assertNotIn("type", gen["body"])
+        self.assertEqual(gen["body"].get("model"), "claude-test-model")
+        self.assertEqual(gen["body"].get("usageDetails"), {"input": 10, "output": 5})
+        # SPAN / EVENT stay on observation-create.
+        spans = [e for e in events if e["type"] == "observation-create"]
+        self.assertTrue(any(e["body"].get("type") == "SPAN" for e in spans))
+        self.assertFalse(any(
+            e["type"] == "observation-create" and e["body"].get("type") == "GENERATION"
+            for e in events
+        ))
+
     def test_tool_span_body_masks_secret_via_pipeline(self):
         secret = "sk-" + ("pipeline" + "0" * 20)  # length-bounded sk- token
         turn = make_turn([

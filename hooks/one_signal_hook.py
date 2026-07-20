@@ -48,7 +48,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-PLUGIN_VERSION = "0.0.4"
+PLUGIN_VERSION = "0.0.5"
 
 # --- Paths ---
 STATE_DIR = Path.home() / ".claude" / "state"
@@ -842,11 +842,25 @@ def _observation_create(*, obs_id: str, trace_id: str, parent_id: Optional[str],
                          level: Optional[str] = None) -> Dict[str, Any]:
     # `level` is optional: omit for DEFAULT (server coerces unset → DEFAULT).
     # Only failed tool SPANs pass level="ERROR" so errorRate is non-zero.
-    return _event_envelope("observation-create", {
+    #
+    # Classic ingestion's observation-create only accepts GENERATION | SPAN |
+    # EVENT as body.type -- a "TOOL" type is silently rejected inside the
+    # batch's per-event 207 response (callers emit SPAN for tools).
+    #
+    # Additionally: observation-create + body.model stores model on the
+    # observation read API but does NOT populate Langfuse's
+    # provided_model_name column, so the metrics API dimension
+    # providedModelName stays null and Models analytics is empty (verified
+    # 2026-07-20 against production Langfuse). GENERATION observations must
+    # use envelope type generation-create with the same body fields; body.type
+    # is omitted (the event type implies GENERATION). SPAN and EVENT stay on
+    # observation-create.
+    is_generation = obs_type == "GENERATION"
+    event_type = "generation-create" if is_generation else "observation-create"
+    body: Dict[str, Any] = {
         "id": obs_id,
         "traceId": trace_id,
         "parentObservationId": parent_id,
-        "type": obs_type,
         "name": name,
         "startTime": _iso(start_time),
         "endTime": _iso(end_time),
@@ -856,7 +870,10 @@ def _observation_create(*, obs_id: str, trace_id: str, parent_id: Optional[str],
         "usageDetails": usage_details,
         "metadata": metadata,
         "level": level,
-    })
+    }
+    if not is_generation:
+        body["type"] = obs_type
+    return _event_envelope(event_type, body)
 
 def collect_skill_names(turn: Turn) -> List[str]:
     """Return every explicitly invoked Skill name once, preserving call order.
